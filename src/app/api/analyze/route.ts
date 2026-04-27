@@ -23,6 +23,24 @@ function simpleHash(input: string): number {
   return Math.abs(hash);
 }
 
+function looksLikeConstructionFileName(fileName: string): boolean {
+  const normalized = fileName.toLowerCase();
+  const keywords = [
+    "construction",
+    "site",
+    "scaffold",
+    "crane",
+    "helmet",
+    "ppe",
+    "worker",
+    "building",
+    "concrete",
+    "excavation",
+    "safety"
+  ];
+  return keywords.some((keyword) => normalized.includes(keyword));
+}
+
 function buildMockResult(fileName: string, fileMimeType: string, fileDataUrl: string): HazardAnalysisResult {
   const hash = simpleHash(`${fileName}:${fileMimeType}:${fileDataUrl.slice(0, 250)}`);
   const summaries = [
@@ -174,6 +192,12 @@ export async function POST(request: Request) {
     }
 
     if (USE_MOCK_ANALYSIS) {
+      if (!looksLikeConstructionFileName(body.fileName || "")) {
+        return NextResponse.json({
+          siteSummary: INVALID_IMAGE_MESSAGE,
+          findings: []
+        });
+      }
       return NextResponse.json(
         buildMockResult(body.fileName || "uploaded-file", fileMimeType, body.fileDataUrl)
       );
