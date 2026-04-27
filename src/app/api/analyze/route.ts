@@ -3,46 +3,80 @@ import type { HazardAnalysisResult } from "@/types/hazards";
 
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/responses";
 const USE_MOCK_ANALYSIS = process.env.USE_MOCK_ANALYSIS === "true";
+const INVALID_IMAGE_MESSAGE =
+  "No valid construction site image detected. Please upload a clear photo of the site for analysis.";
 
 const SYSTEM_PROMPT =
-  "You are a construction safety auditor. Analyze the image and identify only visible construction safety hazards. " +
-  "Return strict JSON with this shape: " +
-  '{"siteSummary":"string","findings":[{"title":"string","severity":"Low|Medium|High|Critical","confidence":0-100,"location":"string","risk":"string","recommendation":"string"}]} ' +
-  "If no clear hazards are visible, return an empty findings array with a concise siteSummary.";
+  "You are a construction safety auditor. First determine if the provided file is a valid construction site image or construction-site document photo/PDF. " +
+  "If the file is not a construction site, or is blank/missing/unclear, return strict JSON: " +
+  `{"isValidConstructionSite":false,"siteSummary":"${INVALID_IMAGE_MESSAGE}","findings":[]}. ` +
+  "If valid, return strict JSON: " +
+  '{"isValidConstructionSite":true,"siteSummary":"string","findings":[{"title":"string","severity":"Low|Medium|High|Critical","confidence":0-100,"location":"string","risk":"string","recommendation":"string"}]}. ' +
+  "Do not invent hazards when the image is invalid.";
 
-const MOCK_RESULT: HazardAnalysisResult = {
-  siteSummary:
-    "Mock analysis mode is enabled. The image appears to show an active construction area with several visible safety compliance concerns that should be reviewed before work continues.",
-  findings: [
+function simpleHash(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash << 5) - hash + input.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function buildMockResult(fileName: string, fileMimeType: string, fileDataUrl: string): HazardAnalysisResult {
+  const hash = simpleHash(`${fileName}:${fileMimeType}:${fileDataUrl.slice(0, 250)}`);
+  const summaries = [
+    "Potential edge-protection and housekeeping concerns are visible and should be reviewed immediately.",
+    "Site conditions suggest moderate compliance gaps around access safety and equipment handling.",
+    "Several visible conditions indicate elevated risk areas requiring targeted mitigation controls."
+  ];
+
+  const hazardTemplates: HazardAnalysisResult["findings"] = [
     {
-      title: "Worker at height without visible fall arrest",
-      severity: "Critical",
-      confidence: 88,
-      location: "Upper level near unfinished edge",
-      risk: "High risk of severe injury due to potential fall from elevation.",
-      recommendation:
-        "Require full body harness with approved anchor points and install temporary guardrails."
-    },
-    {
-      title: "Materials stacked unsafely near pathway",
+      title: "Inadequate edge protection",
       severity: "High",
       confidence: 84,
-      location: "Ground floor access route",
-      risk: "Trip and struck-by hazards for workers moving through the area.",
-      recommendation:
-        "Reorganize storage zones, secure stacked materials, and keep marked walkways clear."
+      location: "Elevated work perimeter",
+      risk: "Workers may be exposed to fall-from-height incidents.",
+      recommendation: "Install temporary guardrails and verify fall-arrest equipment usage."
+    },
+    {
+      title: "Poor material housekeeping",
+      severity: "Medium",
+      confidence: 79,
+      location: "Primary access pathway",
+      risk: "Loose materials can create slip/trip hazards and obstruct evacuation routes.",
+      recommendation: "Clear walkways and enforce designated storage zones."
     },
     {
       title: "Incomplete PPE compliance",
       severity: "Medium",
-      confidence: 79,
-      location: "Central work zone",
-      risk: "Increased exposure to head and eye injury from debris or tool impact.",
-      recommendation:
-        "Enforce PPE checks at entry points and confirm hard hat and eye protection use."
+      confidence: 76,
+      location: "Active work zone",
+      risk: "Insufficient PPE raises likelihood of head/eye injury.",
+      recommendation: "Enforce PPE checks at entry points and supervisory spot audits."
+    },
+    {
+      title: "Uncontrolled lifting zone",
+      severity: "Critical",
+      confidence: 81,
+      location: "Near material handling area",
+      risk: "Dropped loads or swing radius intrusion can cause severe injury.",
+      recommendation: "Establish exclusion barriers and assign a banksman/spotter."
     }
-  ]
-};
+  ];
+
+  const findingsCount = (hash % 3) + 1;
+  const offset = hash % hazardTemplates.length;
+  const findings = Array.from({ length: findingsCount }, (_, index) => {
+    return hazardTemplates[(offset + index) % hazardTemplates.length];
+  });
+
+  return {
+    siteSummary: `[Mock mode] ${summaries[hash % summaries.length]} (${fileName || fileMimeType})`,
+    findings
+  };
+}
 
 function extractTextOutput(payload: unknown): string {
   if (!payload || typeof payload !== "object") {
@@ -85,10 +119,21 @@ function extractTextOutput(payload: unknown): string {
 }
 
 function parseAndValidateResult(rawText: string): HazardAnalysisResult {
-  const parsed = JSON.parse(rawText) as HazardAnalysisResult;
+  const parsed = JSON.parse(rawText) as {
+    isValidConstructionSite?: boolean;
+    siteSummary?: string;
+    findings?: HazardAnalysisResult["findings"];
+  };
 
   if (!parsed || typeof parsed.siteSummary !== "string" || !Array.isArray(parsed.findings)) {
     throw new Error("Invalid model response format.");
+  }
+
+  if (parsed.isValidConstructionSite === false) {
+    return {
+      siteSummary: INVALID_IMAGE_MESSAGE,
+      findings: []
+    };
   }
 
   return {
@@ -106,13 +151,32 @@ function parseAndValidateResult(rawText: string): HazardAnalysisResult {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as { imageDataUrl?: string };
-    if (!body.imageDataUrl || typeof body.imageDataUrl !== "string") {
-      return NextResponse.json({ error: "Image is required." }, { status: 400 });
+    const body = (await request.json()) as {
+      fileDataUrl?: string;
+      fileMimeType?: string;
+      fileName?: string;
+    };
+    if (!body.fileDataUrl || typeof body.fileDataUrl !== "string") {
+      return NextResponse.json({
+        siteSummary: INVALID_IMAGE_MESSAGE,
+        findings: []
+      });
+    }
+
+    const fileMimeType = body.fileMimeType || "";
+    const isSupportedType =
+      fileMimeType.startsWith("image/") || fileMimeType === "application/pdf";
+    if (!isSupportedType) {
+      return NextResponse.json({
+        siteSummary: INVALID_IMAGE_MESSAGE,
+        findings: []
+      });
     }
 
     if (USE_MOCK_ANALYSIS) {
-      return NextResponse.json(MOCK_RESULT);
+      return NextResponse.json(
+        buildMockResult(body.fileName || "uploaded-file", fileMimeType, body.fileDataUrl)
+      );
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -141,12 +205,24 @@ export async function POST(request: Request) {
             content: [
               {
                 type: "input_text",
-                text: "Analyze this construction site image for safety hazards."
+                text:
+                  "Analyze this uploaded file for construction-site safety hazards. " +
+                  "If this is not a construction site, return the invalid response exactly as instructed."
               },
-              {
-                type: "input_image",
-                image_url: body.imageDataUrl
-              }
+              ...(fileMimeType === "application/pdf"
+                ? [
+                    {
+                      type: "input_file",
+                      filename: body.fileName || "uploaded-site-file.pdf",
+                      file_data: body.fileDataUrl
+                    }
+                  ]
+                : [
+                    {
+                      type: "input_image",
+                      image_url: body.fileDataUrl
+                    }
+                  ])
             ]
           }
         ]

@@ -1,6 +1,7 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import Image from "next/image";
+import { ChangeEvent, DragEvent, useMemo, useState } from "react";
 import type { HazardAnalysisResult, HazardFinding } from "@/types/hazards";
 
 const severityStyleMap: Record<HazardFinding["severity"], string> = {
@@ -21,9 +22,11 @@ async function fileToDataURL(file: File): Promise<string> {
 
 export default function HomePage() {
   const [previewUrl, setPreviewUrl] = useState<string>("");
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [analysis, setAnalysis] = useState<HazardAnalysisResult | null>(null);
   const [error, setError] = useState<string>("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   const findingCountLabel = useMemo(() => {
     if (!analysis) {
@@ -33,26 +36,49 @@ export default function HomePage() {
     return `${count} hazard${count === 1 ? "" : "s"} detected`;
   }, [analysis]);
 
-  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const processFile = async (file: File | undefined) => {
     if (!file) {
       return;
     }
 
-    if (!file.type.startsWith("image/")) {
-      setError("Please upload a valid image file.");
+    if (!file.type.startsWith("image/") && file.type !== "application/pdf") {
+      setError("Please upload an image or PDF file.");
       return;
     }
 
     setError("");
     setAnalysis(null);
-    const dataUrl = await fileToDataURL(file);
-    setPreviewUrl(dataUrl);
+    setUploadedFile(file);
+    if (file.type.startsWith("image/")) {
+      const dataUrl = await fileToDataURL(file);
+      setPreviewUrl(dataUrl);
+    } else {
+      setPreviewUrl("");
+    }
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    await processFile(event.target.files?.[0]);
+  };
+
+  const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+    await processFile(event.dataTransfer.files?.[0]);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
   };
 
   const handleAnalyze = async () => {
-    if (!previewUrl) {
-      setError("Upload an image before analyzing.");
+    if (!uploadedFile) {
+      setError("Upload an image or PDF before analyzing.");
       return;
     }
 
@@ -60,10 +86,15 @@ export default function HomePage() {
     setError("");
 
     try {
+      const fileDataUrl = await fileToDataURL(uploadedFile);
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageDataUrl: previewUrl })
+        body: JSON.stringify({
+          fileDataUrl,
+          fileMimeType: uploadedFile.type,
+          fileName: uploadedFile.name
+        })
       });
 
       const data = (await response.json()) as HazardAnalysisResult & { error?: string };
@@ -96,20 +127,37 @@ export default function HomePage() {
         <div className="mt-8 grid gap-6 lg:grid-cols-2">
           <div className="rounded-xl border border-dashed border-slate-400/40 bg-slate-900/40 p-5">
             <label className="block text-sm font-medium text-slate-200" htmlFor="site-image">
-              Upload Image
+              Upload Image or PDF
             </label>
+            <div
+              className={`mt-3 rounded-lg border border-dashed p-4 text-sm transition ${
+                isDragging
+                  ? "border-blue-400 bg-blue-500/10 text-blue-100"
+                  : "border-slate-600 bg-slate-950/50 text-slate-300"
+              }`}
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+            >
+              Drag and drop a file here, or select one below.
+            </div>
             <input
               id="site-image"
               className="mt-3 block w-full cursor-pointer rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-200 file:mr-4 file:cursor-pointer file:rounded-md file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-blue-500"
               type="file"
-              accept="image/*"
+              accept="image/*,application/pdf"
               onChange={handleFileChange}
             />
+            {uploadedFile ? (
+              <p className="mt-2 text-xs text-slate-300">
+                Selected: {uploadedFile.name} ({uploadedFile.type || "unknown type"})
+              </p>
+            ) : null}
             <button
               className="mt-4 inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-700/60"
               type="button"
               onClick={handleAnalyze}
-              disabled={!previewUrl || isAnalyzing}
+              disabled={!uploadedFile || isAnalyzing}
             >
               {isAnalyzing ? "Analyzing..." : "Analyze Safety Hazards"}
             </button>
@@ -117,10 +165,17 @@ export default function HomePage() {
           </div>
 
           <div className="overflow-hidden rounded-xl border border-slate-700/70 bg-slate-950/60">
-            {previewUrl ? (
-              <img
+            {uploadedFile?.type === "application/pdf" ? (
+              <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-slate-300">
+                PDF uploaded successfully. Click analyze to run safety review.
+              </div>
+            ) : previewUrl ? (
+              <Image
                 src={previewUrl}
                 alt="Uploaded construction site preview"
+                width={1200}
+                height={800}
+                unoptimized
                 className="h-full max-h-80 w-full object-contain"
               />
             ) : (
